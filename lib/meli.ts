@@ -82,6 +82,11 @@ export async function fetchMeliSeller(sellerId: number) {
 export async function fetchCatalogItems(
   productId: string
 ): Promise<Array<{ id: string; price: number; seller_id: number }>> {
+  // Primary: search endpoint — doesn't require catalog-level scopes (no 403 PolicyAgent)
+  const results = await fetchCatalogItemsViaSearch(productId)
+  if (results.length > 0) return results
+
+  // Fallback: direct catalog endpoint (requires read_catalog_products scope)
   try {
     const res = await fetch(`${MELI_API}/products/${productId}/items`, {
       headers: await authHeaders(),
@@ -90,6 +95,56 @@ export async function fetchCatalogItems(
     if (!res.ok) return []
     const data = await res.json()
     return (data.results ?? []) as Array<{ id: string; price: number; seller_id: number }>
+  } catch {
+    return []
+  }
+}
+
+async function fetchCatalogItemsViaSearch(
+  productId: string
+): Promise<Array<{ id: string; price: number; seller_id: number }>> {
+  try {
+    const url = `${MELI_API}/sites/MLA/search?catalog_product_id=${productId}&limit=50`
+    const res = await fetch(url, {
+      headers: await authHeaders(),
+      next: { revalidate: 0 },
+    })
+    if (!res.ok) return []
+    const data = await res.json()
+    const items = (data.results ?? []) as Array<{
+      id: string
+      price: number
+      seller?: { id: number }
+      seller_id?: number
+    }>
+    return items.map((r) => ({
+      id: r.id,
+      price: r.price,
+      seller_id: r.seller?.id ?? r.seller_id ?? 0,
+    }))
+  } catch {
+    return []
+  }
+}
+
+export async function searchItemsBySeller(
+  sellerId: number,
+  query?: string
+): Promise<Array<{ id: string; price: number; title: string }>> {
+  try {
+    const params = new URLSearchParams({ seller_id: String(sellerId), limit: '50' })
+    if (query) params.set('q', query)
+    const res = await fetch(`${MELI_API}/sites/MLA/search?${params}`, {
+      headers: await authHeaders(),
+      next: { revalidate: 0 },
+    })
+    if (!res.ok) return []
+    const data = await res.json()
+    return (data.results ?? []).map((r: { id: string; price: number; title: string }) => ({
+      id: r.id,
+      price: r.price,
+      title: r.title,
+    }))
   } catch {
     return []
   }
