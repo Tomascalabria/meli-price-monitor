@@ -1,29 +1,16 @@
 /**
  * Test de conexión con la API de MercadoLibre
  *
- * SETUP (1 vez):
- *   1. Copiá .env.example a .env.local
- *   2. Entrá a https://developers.mercadolibre.com.ar/ y creá una app (gratis)
- *   3. Pegá el App ID y Secret Key en .env.local
+ * SETUP:
+ *   Copiá .env.example a .env.local y completá MELI_APP_ID y MELI_APP_SECRET
  *
  * USO:
- *   node test-meli.mjs                    → usa MLA1670651449 por defecto
- *   node test-meli.mjs MLA123456789       → item específico
+ *   node test-meli.mjs                 → usa MLA1670651449 por defecto
+ *   node test-meli.mjs MLA123456789    → item específico
  */
 
-import { readFileSync } from 'fs'
-import { resolve } from 'path'
-
-// Cargar .env.local si existe
-try {
-  const env = readFileSync(resolve('.env.local'), 'utf8')
-  for (const line of env.split('\n')) {
-    const [key, ...rest] = line.split('=')
-    if (key && rest.length && !key.startsWith('#')) {
-      process.env[key.trim()] = rest.join('=').trim()
-    }
-  }
-} catch { /* .env.local no existe todavía */ }
+import { config } from 'dotenv'
+config({ path: '.env.local' })
 
 const ITEM_ID = process.argv[2] ?? 'MLA1670651449'
 const APP_ID = process.env.MELI_APP_ID
@@ -31,6 +18,7 @@ const APP_SECRET = process.env.MELI_APP_SECRET
 
 async function getToken() {
   if (!APP_ID || !APP_SECRET) return null
+
   const res = await fetch('https://api.mercadolibre.com/oauth/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -40,7 +28,13 @@ async function getToken() {
       client_secret: APP_SECRET,
     }),
   })
-  if (!res.ok) { console.error('  ❌ Error obteniendo token:', await res.text()); return null }
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => res.text())
+    console.error('  ❌ Error obteniendo token:', JSON.stringify(err))
+    return null
+  }
+
   const data = await res.json()
   return data.access_token
 }
@@ -50,22 +44,24 @@ async function test() {
 
   // 0. Auth
   if (!APP_ID || !APP_SECRET) {
-    console.log('⚠️  Sin credenciales MELI. Algunas requests pueden dar 403.')
-    console.log('   → Creá .env.local con MELI_APP_ID y MELI_APP_SECRET')
-    console.log('   → https://developers.mercadolibre.com.ar/\n')
-  } else {
-    console.log('🔑  Obteniendo token OAuth...')
-    const token = await getToken()
-    if (token) {
-      console.log('   ✅ Token OK\n')
-    } else {
-      console.log('   ❌ No se pudo obtener token. Revisá las credenciales.\n')
-      return
-    }
+    console.log('❌  Credenciales no encontradas.')
+    console.log('    Creá .env.local en la raíz del proyecto con:')
+    console.log('      MELI_APP_ID=tu_app_id')
+    console.log('      MELI_APP_SECRET=tu_secret_key')
+    console.log('    → https://developers.mercadolibre.com.ar/\n')
+    return
   }
 
-  const token = APP_ID && APP_SECRET ? await getToken() : null
-  const headers = token ? { Authorization: `Bearer ${token}` } : {}
+  console.log(`🔑  App ID: ${APP_ID}`)
+  console.log('    Obteniendo token OAuth...')
+  const token = await getToken()
+  if (!token) {
+    console.log('\n❌  No se pudo obtener token. Revisá las credenciales.')
+    return
+  }
+  console.log('    ✅ Token OK\n')
+
+  const headers = { Authorization: `Bearer ${token}` }
 
   // 1. Item básico
   console.log('1️⃣  GET /items/:id')
@@ -73,8 +69,8 @@ async function test() {
   console.log('   Status:', itemRes.status)
 
   if (!itemRes.ok) {
-    const err = await itemRes.text()
-    console.error('   ❌ Error:', err)
+    const err = await itemRes.json().catch(() => itemRes.text())
+    console.error('   ❌ Error:', JSON.stringify(err))
     return
   }
 
@@ -85,7 +81,6 @@ async function test() {
   console.log('   condition:         ', item.condition)
   console.log('   available_quantity:', item.available_quantity)
   console.log('   seller_id:         ', item.seller_id)
-  console.log('   thumbnail:         ', item.thumbnail)
 
   // 2. Descripción
   console.log('\n2️⃣  GET /items/:id/description')
@@ -93,7 +88,7 @@ async function test() {
   console.log('   Status:', descRes.status)
   if (descRes.ok) {
     const desc = await descRes.json()
-    const preview = desc.plain_text?.replace(/\n+/g, ' ').trim().slice(0, 250)
+    const preview = desc.plain_text?.replace(/\s+/g, ' ').trim().slice(0, 250)
     console.log('   descripción:', preview ? `"${preview}..."` : '(vacía)')
   }
 
@@ -103,9 +98,9 @@ async function test() {
   console.log('   Status:', sellerRes.status)
   if (sellerRes.ok) {
     const s = await sellerRes.json()
-    console.log('   nickname:        ', s.nickname)
-    console.log('   reputation:      ', s.seller_reputation?.level_id ?? 'N/A')
-    console.log('   transacciones:   ', s.seller_reputation?.transactions?.total ?? 'N/A')
+    console.log('   nickname:      ', s.nickname)
+    console.log('   reputation:    ', s.seller_reputation?.level_id ?? 'N/A')
+    console.log('   transacciones: ', s.seller_reputation?.transactions?.total ?? 'N/A')
   }
 
   // 4. Batch
@@ -115,9 +110,9 @@ async function test() {
   const first = batch[0]
   console.log('   code:', first?.code, '| price:', first?.body?.price, first?.body?.currency_id)
 
-  // 5. Catálogo — todos los sellers del mismo producto
+  // 5. Todos los sellers del mismo producto (catálogo)
   const CATALOG_ID = 'MLA37106988'
-  console.log(`\n5️⃣  GET /products/${CATALOG_ID}/items (todos los sellers)`)
+  console.log(`\n5️⃣  GET /products/${CATALOG_ID}/items (todos los sellers del mismo producto)`)
   const catalogRes = await fetch(`https://api.mercadolibre.com/products/${CATALOG_ID}/items`, { headers })
   console.log('   Status:', catalogRes.status)
   if (catalogRes.ok) {
@@ -130,7 +125,7 @@ async function test() {
     if (results.length > 5) console.log(`   ... y ${results.length - 5} más`)
   }
 
-  console.log('\n✅  Test completo.\n')
+  console.log('\n✅  Test completo — el bot puede trackear estos items.\n')
 }
 
 test().catch(console.error)
