@@ -56,6 +56,17 @@ async function check(label, url, opts = {}) {
 async function test() {
   console.log('\n=== MELI — Diagnóstico de conectividad ===\n')
 
+  // ── FASE 0: variables de entorno que pueden afectar la red ───────────────
+  console.log('FASE 0 — Variables de entorno de red')
+  console.log('─'.repeat(55))
+  const proxyVars = ['HTTPS_PROXY','https_proxy','HTTP_PROXY','http_proxy','NO_PROXY','NODE_TLS_REJECT_UNAUTHORIZED']
+  for (const v of proxyVars) {
+    if (process.env[v]) console.log(`   ${v} = ${process.env[v]}`)
+  }
+  const hasProxy = proxyVars.some(v => process.env[v])
+  if (!hasProxy) console.log('   (ninguna variable de proxy detectada)')
+  console.log()
+
   // ── FASE 1: conectividad básica (sin auth, endpoints simples) ─────────────
   console.log('FASE 1 — Conectividad básica (sin auth)')
   console.log('─'.repeat(55))
