@@ -19,12 +19,16 @@ const APP_ID      = process.env.MELI_APP_ID
 const APP_SECRET  = process.env.MELI_APP_SECRET
 const REFRESH_TOK = process.env.MELI_REFRESH_TOKEN
 
+// MELI bloquea el User-Agent por defecto de Node.js (undici). Usamos uno de browser.
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+const baseHeaders = { 'User-Agent': UA }
+
 async function getToken() {
   if (!APP_ID || !APP_SECRET) return null
   if (REFRESH_TOK) {
     const res = await fetch('https://api.mercadolibre.com/oauth/token', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...baseHeaders },
       body: new URLSearchParams({
         grant_type: 'refresh_token',
         client_id: APP_ID,
@@ -39,7 +43,9 @@ async function getToken() {
 
 async function check(label, url, opts = {}) {
   try {
-    const res = await fetch(url, opts)
+    // Merge User-Agent into every request — MELI blocks Node.js's default UA
+    const mergedOpts = { ...opts, headers: { ...baseHeaders, ...(opts.headers ?? {}) } }
+    const res = await fetch(url, mergedOpts)
     const body = await res.json().catch(() => null)
     const ok = res.ok ? '✅' : '❌'
     const msg = body?.message ?? body?.error ?? ''

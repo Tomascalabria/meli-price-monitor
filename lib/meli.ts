@@ -3,9 +3,16 @@ import { getMeliToken } from './meli-auth'
 
 const MELI_API = 'https://api.mercadolibre.com'
 
+// MELI's API blocks requests with Node.js default User-Agent (undici).
+// Using a browser UA makes all endpoints respond normally.
+const BROWSER_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+
 async function authHeaders(): Promise<Record<string, string>> {
   const token = await getMeliToken()
-  return token ? { Authorization: `Bearer ${token}` } : {}
+  const base: Record<string, string> = { 'User-Agent': BROWSER_UA }
+  if (token) base['Authorization'] = `Bearer ${token}`
+  return base
 }
 
 export async function fetchMeliItem(itemId: string): Promise<MeliItemResponse | null> {
