@@ -1,4 +1,4 @@
-import { createServerClient } from '@/lib/supabase'
+import { getDb } from '@/lib/db'
 import { StatsCard } from '@/components/StatsCard'
 import { ProductGroupCard } from '@/components/ProductGroupCard'
 import { RunScrapeButton } from '@/components/RunScrapeButton'
@@ -9,65 +9,54 @@ import Link from 'next/link'
 
 export const dynamic = 'force-dynamic'
 
-export default async function DashboardPage() {
-  const supabase = createServerClient()
+export default function DashboardPage() {
+  const db = getDb()
 
-  const [{ data: rawGroups }, { count: totalItems }, { data: lastSnapshot }] = await Promise.all([
-    supabase.from('product_groups').select(`
-      *,
-      tracked_items(id, is_active)
-    `),
-    supabase.from('tracked_items').select('*', { count: 'exact', head: true }).eq('is_active', true),
-    supabase
-      .from('price_history')
-      .select('snapshot_at')
-      .order('snapshot_at', { ascending: false })
-      .limit(1)
-      .single(),
-  ])
+  const rawGroups = db.prepare('SELECT * FROM product_groups ORDER BY created_at DESC').all() as Record<string, unknown>[]
+  const totalSellers = (db.prepare('SELECT COUNT(*) as c FROM tracked_items WHERE is_active = 1').get() as { c: number }).c
+  const lastSnapshot = db.prepare('SELECT snapshot_at FROM price_history ORDER BY snapshot_at DESC LIMIT 1').get() as { snapshot_at: string } | undefined
 
-  const groups = rawGroups ?? []
+  const enrichedGroups: ProductGroupWithStats[] = rawGroups.map((group) => {
+    const activeItems = db
+      .prepare('SELECT id FROM tracked_items WHERE product_group_id = ? AND is_active = 1')
+      .all(group.id as string) as { id: string }[]
 
-  // Enrich groups with price stats
-  const enrichedGroups: ProductGroupWithStats[] = await Promise.all(
-    groups.map(async (group) => {
-      const activeIds = (group.tracked_items as Array<{ id: string; is_active: boolean }>)
-        .filter((i) => i.is_active)
-        .map((i) => i.id)
+    if (activeItems.length === 0) {
+      return { ...(group as unknown as ProductGroupWithStats), item_count: 0, min_price: null, max_price: null, avg_price: null, alert_count: 0 }
+    }
 
-      if (activeIds.length === 0) {
-        return { ...group, item_count: 0, min_price: null, max_price: null, avg_price: null, alert_count: 0 }
-      }
+    const ids = activeItems.map((i) => i.id)
+    const ph = ids.map(() => '?').join(',')
 
-      const { data: prices } = await supabase
-        .from('latest_prices')
-        .select('price')
-        .in('tracked_item_id', activeIds)
+    const prices = db
+      .prepare(
+        `SELECT ph.price FROM price_history ph
+         INNER JOIN (
+           SELECT tracked_item_id, MAX(snapshot_at) AS max_at
+           FROM price_history WHERE tracked_item_id IN (${ph}) GROUP BY tracked_item_id
+         ) lp ON ph.tracked_item_id = lp.tracked_item_id AND ph.snapshot_at = lp.max_at`
+      )
+      .all(...ids) as { price: number }[]
 
-      const vals = (prices ?? []).map((p: { price: number }) => p.price)
+    const vals = prices.map((p) => p.price)
+    if (vals.length === 0) {
+      return { ...(group as unknown as ProductGroupWithStats), item_count: ids.length, min_price: null, max_price: null, avg_price: null, alert_count: 0 }
+    }
 
-      if (vals.length === 0) {
-        return { ...group, item_count: activeIds.length, min_price: null, max_price: null, avg_price: null, alert_count: 0 }
-      }
+    const min_price = Math.min(...vals)
+    const max_price = Math.max(...vals)
+    const avg_price = vals.reduce((a, b) => a + b, 0) / vals.length
+    const threshold = (group.alert_threshold_pct as number) / 100
+    const ref = (group.reference_price as number | null) ?? avg_price
+    const alert_count = vals.filter((p) => Math.abs(p - ref) / ref > threshold).length
 
-      const min_price = Math.min(...vals)
-      const max_price = Math.max(...vals)
-      const avg_price = vals.reduce((a: number, b: number) => a + b, 0) / vals.length
-      const threshold = group.alert_threshold_pct / 100
-      const ref = group.reference_price ?? avg_price
-      const alert_count = vals.filter((p: number) => Math.abs(p - ref) / ref > threshold).length
+    return { ...(group as unknown as ProductGroupWithStats), item_count: ids.length, min_price, max_price, avg_price, alert_count }
+  })
 
-      return { ...group, item_count: activeIds.length, min_price, max_price, avg_price, alert_count }
-    })
-  )
-
-  const totalGroups = enrichedGroups.length
   const totalAlerts = enrichedGroups.reduce((sum, g) => sum + g.alert_count, 0)
-  const totalSellers = totalItems ?? 0
 
   return (
     <div className="max-w-6xl mx-auto">
-      {/* Header */}
       <div className="flex items-center justify-between mb-8">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">Dashboard</h1>
@@ -81,11 +70,10 @@ export default async function DashboardPage() {
         <RunScrapeButton />
       </div>
 
-      {/* Stats */}
       <div className="grid grid-cols-4 gap-4 mb-8">
         <StatsCard
           title="Grupos de productos"
-          value={totalGroups}
+          value={enrichedGroups.length}
           subtitle="grupos monitoreados"
           icon={Boxes}
           accentColor="bg-brand-500"
@@ -113,7 +101,6 @@ export default async function DashboardPage() {
         />
       </div>
 
-      {/* Groups */}
       {enrichedGroups.length === 0 ? (
         <div className="bg-white rounded-xl border border-slate-200 p-12 text-center">
           <Boxes className="w-10 h-10 text-slate-300 mx-auto mb-3" />
@@ -133,7 +120,7 @@ export default async function DashboardPage() {
           {totalAlerts > 0 && (
             <div className="flex items-center gap-2 bg-red-50 border border-red-200 text-red-800 px-4 py-3 rounded-xl mb-4 text-sm">
               <AlertTriangle className="w-4 h-4 flex-shrink-0" />
-              <strong>{totalAlerts} alerta{totalAlerts > 1 ? 's'  : ''}</strong> de precios fuera de rango detectada{totalAlerts > 1 ? 's' : ''}.
+              <strong>{totalAlerts} alerta{totalAlerts > 1 ? 's' : ''}</strong> de precios fuera de rango detectada{totalAlerts > 1 ? 's' : ''}.
               Revisá los grupos marcados en rojo.
             </div>
           )}

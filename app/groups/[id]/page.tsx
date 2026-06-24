@@ -9,7 +9,6 @@ import { ArrowLeft, Plus, Settings, Trash2, X } from 'lucide-react'
 import { formatPrice } from '@/lib/utils'
 import Link from 'next/link'
 import type { ProductGroup, TrackedItemWithLatestPrice } from '@/lib/types'
-import { createServerClient } from '@/lib/supabase'
 
 interface GroupDetail extends ProductGroup {
   items: TrackedItemWithLatestPrice[]

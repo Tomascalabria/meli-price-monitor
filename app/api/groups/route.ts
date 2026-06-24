@@ -1,86 +1,62 @@
 import { NextResponse } from 'next/server'
-import { createServerClient } from '@/lib/supabase'
+import { getDb, newId } from '@/lib/db'
 
 export async function GET() {
-  const supabase = createServerClient()
+  const db = getDb()
 
-  const { data: groups, error } = await supabase
-    .from('product_groups')
-    .select(`
-      *,
-      tracked_items!inner(
-        id,
-        meli_item_id,
-        seller_nickname,
-        title,
-        is_active
+  const groups = db.prepare('SELECT * FROM product_groups ORDER BY created_at DESC').all() as Record<string, unknown>[]
+
+  const result = groups.map((group) => {
+    const activeItems = db
+      .prepare('SELECT id FROM tracked_items WHERE product_group_id = ? AND is_active = 1')
+      .all(group.id as string) as { id: string }[]
+
+    if (activeItems.length === 0) {
+      return { ...group, item_count: 0, min_price: null, max_price: null, avg_price: null, alert_count: 0 }
+    }
+
+    const ids = activeItems.map((i) => i.id)
+    const placeholders = ids.map(() => '?').join(',')
+
+    const prices = db
+      .prepare(
+        `SELECT ph.price FROM price_history ph
+         INNER JOIN (
+           SELECT tracked_item_id, MAX(snapshot_at) AS max_at
+           FROM price_history WHERE tracked_item_id IN (${placeholders})
+           GROUP BY tracked_item_id
+         ) lp ON ph.tracked_item_id = lp.tracked_item_id AND ph.snapshot_at = lp.max_at`
       )
-    `)
-    .order('created_at', { ascending: false })
+      .all(...ids) as { price: number }[]
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+    const vals = prices.map((p) => p.price)
+    if (vals.length === 0) {
+      return { ...group, item_count: ids.length, min_price: null, max_price: null, avg_price: null, alert_count: 0 }
+    }
 
-  // Enrich with latest price stats per group
-  const groupsWithStats = await Promise.all(
-    (groups ?? []).map(async (group) => {
-      const itemIds = group.tracked_items
-        .filter((i: { is_active: boolean }) => i.is_active)
-        .map((i: { id: string }) => i.id)
+    const min_price = Math.min(...vals)
+    const max_price = Math.max(...vals)
+    const avg_price = vals.reduce((a, b) => a + b, 0) / vals.length
+    const threshold = (group.alert_threshold_pct as number) / 100
+    const ref = (group.reference_price as number | null) ?? avg_price
+    const alert_count = vals.filter((p) => Math.abs(p - ref) / ref > threshold).length
 
-      if (itemIds.length === 0) {
-        return { ...group, min_price: null, max_price: null, avg_price: null, alert_count: 0 }
-      }
+    return { ...group, item_count: ids.length, min_price, max_price, avg_price, alert_count }
+  })
 
-      const { data: prices } = await supabase
-        .from('latest_prices')
-        .select('price')
-        .in('tracked_item_id', itemIds)
-
-      const priceValues = (prices ?? []).map((p: { price: number }) => p.price)
-
-      if (priceValues.length === 0) {
-        return { ...group, min_price: null, max_price: null, avg_price: null, alert_count: 0 }
-      }
-
-      const min_price = Math.min(...priceValues)
-      const max_price = Math.max(...priceValues)
-      const avg_price = priceValues.reduce((a: number, b: number) => a + b, 0) / priceValues.length
-
-      const threshold = group.alert_threshold_pct / 100
-      const ref = group.reference_price ?? avg_price
-      const alert_count = priceValues.filter(
-        (p: number) => Math.abs(p - ref) / ref > threshold
-      ).length
-
-      return {
-        ...group,
-        item_count: itemIds.length,
-        min_price,
-        max_price,
-        avg_price,
-        alert_count,
-      }
-    })
-  )
-
-  return NextResponse.json(groupsWithStats)
+  return NextResponse.json(result)
 }
 
 export async function POST(req: Request) {
-  const supabase = createServerClient()
+  const db = getDb()
   const body = await req.json()
+  const id = newId()
 
-  const { data, error } = await supabase
-    .from('product_groups')
-    .insert({
-      name: body.name,
-      description: body.description ?? null,
-      reference_price: body.reference_price ?? null,
-      alert_threshold_pct: body.alert_threshold_pct ?? 5.0,
-    })
-    .select()
-    .single()
+  db.prepare(
+    `INSERT INTO product_groups (id, name, description, reference_price, alert_threshold_pct)
+     VALUES (?, ?, ?, ?, ?)`
+  ).run(id, body.name, body.description ?? null, body.reference_price ?? null, body.alert_threshold_pct ?? 5.0)
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-  return NextResponse.json(data, { status: 201 })
+  const group = db.prepare('SELECT * FROM product_groups WHERE id = ?').get(id)
+  return NextResponse.json(group, { status: 201 })
 }

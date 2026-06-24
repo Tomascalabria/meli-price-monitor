@@ -1,31 +1,28 @@
 import { NextResponse } from 'next/server'
-import { createServerClient } from '@/lib/supabase'
+import { getDb } from '@/lib/db'
 
 export async function GET(_req: Request, { params }: { params: { id: string } }) {
-  const supabase = createServerClient()
+  const db = getDb()
 
-  // Get all active tracked items for this group
-  const { data: items } = await supabase
-    .from('tracked_items')
-    .select('id')
-    .eq('product_group_id', params.id)
-    .eq('is_active', true)
+  const items = db
+    .prepare('SELECT id FROM tracked_items WHERE product_group_id = ? AND is_active = 1')
+    .all(params.id) as { id: string }[]
 
-  if (!items || items.length === 0) return NextResponse.json([])
+  if (items.length === 0) return NextResponse.json([])
 
-  const itemIds = items.map((i) => i.id)
+  const ids = items.map((i) => i.id)
+  const ph = ids.map(() => '?').join(',')
 
-  // Fetch last 7 days of price history
   const since = new Date()
   since.setDate(since.getDate() - 7)
 
-  const { data: history, error } = await supabase
-    .from('price_history')
-    .select('tracked_item_id, price, snapshot_at')
-    .in('tracked_item_id', itemIds)
-    .gte('snapshot_at', since.toISOString())
-    .order('snapshot_at', { ascending: true })
+  const history = db
+    .prepare(
+      `SELECT tracked_item_id, price, snapshot_at FROM price_history
+       WHERE tracked_item_id IN (${ph}) AND snapshot_at >= ?
+       ORDER BY snapshot_at ASC`
+    )
+    .all(...ids, since.toISOString())
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-  return NextResponse.json(history ?? [])
+  return NextResponse.json(history)
 }

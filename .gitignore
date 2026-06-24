@@ -19,5 +19,10 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
+# SQLite database
+data.db
+data.db-shm
+data.db-wal
+
 # Vercel
 .vercel

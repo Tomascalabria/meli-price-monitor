@@ -1,53 +1,60 @@
 import { NextResponse } from 'next/server'
-import { createServerClient } from '@/lib/supabase'
+import { getDb } from '@/lib/db'
 
 export async function GET(_req: Request, { params }: { params: { id: string } }) {
-  const supabase = createServerClient()
+  const db = getDb()
 
-  const { data: group, error } = await supabase
-    .from('product_groups')
-    .select('*')
-    .eq('id', params.id)
-    .single()
+  const group = db.prepare('SELECT * FROM product_groups WHERE id = ?').get(params.id)
+  if (!group) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 404 })
+  const items = db
+    .prepare('SELECT * FROM tracked_items WHERE product_group_id = ? ORDER BY created_at')
+    .all(params.id) as Record<string, unknown>[]
 
-  const { data: items } = await supabase
-    .from('tracked_items')
-    .select('*')
-    .eq('product_group_id', params.id)
-    .order('created_at', { ascending: true })
+  const activeIds = items.filter((i) => i.is_active).map((i) => i.id as string)
 
-  const activeItemIds = (items ?? [])
-    .filter((i) => i.is_active)
-    .map((i) => i.id)
+  let latestMap = new Map<string, { price: number; snapshot_at: string }>()
+  let prevMap = new Map<string, { price: number }>()
 
-  const { data: latestPrices } = await supabase
-    .from('latest_prices')
-    .select('*')
-    .in('tracked_item_id', activeItemIds)
+  if (activeIds.length > 0) {
+    const ph = activeIds.map(() => '?').join(',')
 
-  const { data: prevPrices } = await supabase
-    .from('previous_prices')
-    .select('*')
-    .in('tracked_item_id', activeItemIds)
+    const latest = db
+      .prepare(
+        `SELECT ph.tracked_item_id, ph.price, ph.snapshot_at
+         FROM price_history ph
+         INNER JOIN (
+           SELECT tracked_item_id, MAX(snapshot_at) AS max_at
+           FROM price_history WHERE tracked_item_id IN (${ph}) GROUP BY tracked_item_id
+         ) lp ON ph.tracked_item_id = lp.tracked_item_id AND ph.snapshot_at = lp.max_at`
+      )
+      .all(...activeIds) as { tracked_item_id: string; price: number; snapshot_at: string }[]
 
-  const latestMap = new Map((latestPrices ?? []).map((p) => [p.tracked_item_id, p]))
-  const prevMap = new Map((prevPrices ?? []).map((p) => [p.tracked_item_id, p]))
+    const prev = db
+      .prepare(
+        `SELECT tracked_item_id, price FROM (
+           SELECT tracked_item_id, price, snapshot_at,
+             ROW_NUMBER() OVER (PARTITION BY tracked_item_id ORDER BY snapshot_at DESC) AS rn
+           FROM price_history WHERE tracked_item_id IN (${ph})
+         ) WHERE rn = 2`
+      )
+      .all(...activeIds) as { tracked_item_id: string; price: number }[]
 
-  const itemsWithPrices = (items ?? []).map((item) => {
-    const latest = latestMap.get(item.id)
-    const prev = prevMap.get(item.id)
+    latestMap = new Map(latest.map((r) => [r.tracked_item_id, r]))
+    prevMap = new Map(prev.map((r) => [r.tracked_item_id, r]))
+  }
+
+  const itemsWithPrices = items.map((item) => {
+    const id = item.id as string
+    const l = latestMap.get(id)
+    const p = prevMap.get(id)
     const price_change_pct =
-      latest && prev && prev.price > 0
-        ? ((latest.price - prev.price) / prev.price) * 100
-        : null
-
+      l && p && p.price > 0 ? ((l.price - p.price) / p.price) * 100 : null
     return {
       ...item,
-      latest_price: latest?.price ?? null,
-      previous_price: prev?.price ?? null,
-      latest_snapshot_at: latest?.snapshot_at ?? null,
+      latest_price: l?.price ?? null,
+      previous_price: p?.price ?? null,
+      latest_snapshot_at: l?.snapshot_at ?? null,
       price_change_pct,
     }
   })
@@ -56,33 +63,19 @@ export async function GET(_req: Request, { params }: { params: { id: string } })
 }
 
 export async function PUT(req: Request, { params }: { params: { id: string } }) {
-  const supabase = createServerClient()
+  const db = getDb()
   const body = await req.json()
 
-  const { data, error } = await supabase
-    .from('product_groups')
-    .update({
-      name: body.name,
-      description: body.description ?? null,
-      reference_price: body.reference_price ?? null,
-      alert_threshold_pct: body.alert_threshold_pct ?? 5.0,
-    })
-    .eq('id', params.id)
-    .select()
-    .single()
+  db.prepare(
+    `UPDATE product_groups SET name=?, description=?, reference_price=?, alert_threshold_pct=?
+     WHERE id=?`
+  ).run(body.name, body.description ?? null, body.reference_price ?? null, body.alert_threshold_pct ?? 5.0, params.id)
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-  return NextResponse.json(data)
+  return NextResponse.json(db.prepare('SELECT * FROM product_groups WHERE id = ?').get(params.id))
 }
 
 export async function DELETE(_req: Request, { params }: { params: { id: string } }) {
-  const supabase = createServerClient()
-
-  const { error } = await supabase
-    .from('product_groups')
-    .delete()
-    .eq('id', params.id)
-
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-  return new NextResponse(null, { status: 204 })
+  const db = getDb()
+  db.prepare('DELETE FROM product_groups WHERE id = ?').run(params.id)
+  return new Response(null, { status: 204 })
 }
