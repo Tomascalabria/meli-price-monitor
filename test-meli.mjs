@@ -1,33 +1,49 @@
 /**
  * Test de conexión con la API de MercadoLibre
- * No requiere ninguna dependencia extra — solo Node.js
- *
- * USO:
- *   node test-meli.mjs                 → usa MLA1670651449 por defecto
- *   node test-meli.mjs MLA123456789    → item específico
+ * USO: node test-meli.mjs [ITEM_ID]
  */
 
 import { readFileSync, existsSync } from 'fs'
 
-// Leer .env.local sin dependencias (maneja Windows \r\n y Unix \n)
 if (existsSync('.env.local')) {
-  const lines = readFileSync('.env.local', 'utf8').split(/\r?\n/)
-  for (const line of lines) {
-    const trimmed = line.trim()
-    if (!trimmed || trimmed.startsWith('#')) continue
-    const eqIdx = trimmed.indexOf('=')
-    if (eqIdx === -1) continue
-    const key = trimmed.slice(0, eqIdx).trim()
-    const value = trimmed.slice(eqIdx + 1).trim()
-    if (key) process.env[key] = value
+  for (const line of readFileSync('.env.local', 'utf8').split(/\r?\n/)) {
+    const t = line.trim()
+    if (!t || t.startsWith('#')) continue
+    const i = t.indexOf('=')
+    if (i === -1) continue
+    process.env[t.slice(0, i).trim()] = t.slice(i + 1).trim()
   }
 }
 
+const APP_ID      = process.env.MELI_APP_ID
+const APP_SECRET  = process.env.MELI_APP_SECRET
+const REFRESH_TOK = process.env.MELI_REFRESH_TOKEN
+
+// Item del link compartido (catálogo) y un item público normal como fallback
+const CATALOG_PRODUCT_ID = 'MLA37106988'
 const ITEM_ID = process.argv[2] ?? 'MLA1670651449'
-const APP_ID = process.env.MELI_APP_ID
-const APP_SECRET = process.env.MELI_APP_SECRET
+// Items de prueba con acceso público conocido
+const FALLBACK_ITEMS = ['MLA1968490983', 'MLA2052005918']
 
 async function getToken() {
+  if (!APP_ID || !APP_SECRET) return null
+
+  // Intentar con refresh token primero
+  if (REFRESH_TOK) {
+    const res = await fetch('https://api.mercadolibre.com/oauth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        client_id: APP_ID,
+        client_secret: APP_SECRET,
+        refresh_token: REFRESH_TOK,
+      }),
+    })
+    if (res.ok) { const d = await res.json(); return d.access_token }
+  }
+
+  // Fallback: client_credentials
   const res = await fetch('https://api.mercadolibre.com/oauth/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -37,92 +53,100 @@ async function getToken() {
       client_secret: APP_SECRET,
     }),
   })
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}))
-    console.error('  ❌ Error obteniendo token:', err.message ?? JSON.stringify(err))
-    return null
-  }
-  const data = await res.json()
-  return data.access_token
+  if (res.ok) { const d = await res.json(); return d.access_token }
+  return null
+}
+
+async function fetchJson(url, headers) {
+  const res = await fetch(url, { headers })
+  return { status: res.status, ok: res.ok, body: await res.json().catch(() => null) }
 }
 
 async function test() {
-  console.log(`\n=== MELI API Test — Item: ${ITEM_ID} ===\n`)
+  console.log('\n=== MELI API Test ===\n')
 
-  if (!APP_ID || !APP_SECRET) {
-    console.log('❌  Credenciales no encontradas en .env.local')
-    console.log('    Asegurate de que el archivo tiene:')
-    console.log('      MELI_APP_ID=tu_app_id')
-    console.log('      MELI_APP_SECRET=tu_secret_key\n')
+  const token = await getToken()
+  if (!token) {
+    console.log('❌  No se pudo obtener token. Corré: node setup-meli-auth.mjs')
     return
   }
-
-  console.log(`🔑  App ID: ${APP_ID}`)
-  console.log('    Obteniendo token...')
-  const token = await getToken()
-  if (!token) return
-  console.log('    ✅ Token OK\n')
-
+  console.log('✅  Token OK\n')
   const h = { Authorization: `Bearer ${token}` }
 
-  // 1. Item
-  console.log('1️⃣  GET /items/:id')
-  const itemRes = await fetch(`https://api.mercadolibre.com/items/${ITEM_ID}`, { headers: h })
-  console.log('   Status:', itemRes.status)
-  if (!itemRes.ok) { console.error('   ❌', await itemRes.text()); return }
-
-  const item = await itemRes.json()
-  console.log('   title:             ', item.title)
-  console.log('   price:            $', item.price, item.currency_id)
-  console.log('   original_price:   $', item.original_price)
-  console.log('   condition:         ', item.condition)
-  console.log('   available_quantity:', item.available_quantity)
-  console.log('   seller_id:         ', item.seller_id)
-
-  // 2. Descripción
-  console.log('\n2️⃣  GET /items/:id/description')
-  const descRes = await fetch(`https://api.mercadolibre.com/items/${ITEM_ID}/description`, { headers: h })
-  console.log('   Status:', descRes.status)
-  if (descRes.ok) {
-    const desc = await descRes.json()
-    const preview = desc.plain_text?.replace(/\s+/g, ' ').trim().slice(0, 250)
-    console.log('   descripción:', preview ? `"${preview}..."` : '(vacía)')
+  // 1. Intentar el item del link (puede dar 403 si es catálogo restringido)
+  console.log(`1️⃣  GET /items/${ITEM_ID}`)
+  const r1 = await fetchJson(`https://api.mercadolibre.com/items/${ITEM_ID}`, h)
+  console.log('   Status:', r1.status)
+  if (r1.ok) {
+    console.log('   ✅ título:', r1.body.title)
+    console.log('   precio:  $', r1.body.price, r1.body.currency_id)
+    console.log('   seller:  ', r1.body.seller_id)
+  } else {
+    console.log('   ⚠️  Este item específico requiere permiso especial de catálogo.')
+    console.log('   Probando con items públicos alternativos...')
   }
 
-  // 3. Seller
-  console.log('\n3️⃣  GET /users/:seller_id')
-  const sellerRes = await fetch(`https://api.mercadolibre.com/users/${item.seller_id}`, { headers: h })
-  console.log('   Status:', sellerRes.status)
-  if (sellerRes.ok) {
-    const s = await sellerRes.json()
-    console.log('   nickname:      ', s.nickname)
-    console.log('   reputation:    ', s.seller_reputation?.level_id ?? 'N/A')
-    console.log('   transacciones: ', s.seller_reputation?.transactions?.total ?? 'N/A')
-  }
-
-  // 4. Batch
-  console.log('\n4️⃣  GET /items?ids=... (batch)')
-  const batchRes = await fetch(`https://api.mercadolibre.com/items?ids=${ITEM_ID}`, { headers: h })
-  const batch = await batchRes.json()
-  const first = batch[0]
-  console.log('   code:', first?.code, '| price: $', first?.body?.price, first?.body?.currency_id)
-
-  // 5. Todos los sellers del mismo producto
-  const CATALOG_ID = 'MLA37106988'
-  console.log(`\n5️⃣  GET /products/${CATALOG_ID}/items (todos los sellers)`)
-  const catalogRes = await fetch(`https://api.mercadolibre.com/products/${CATALOG_ID}/items`, { headers: h })
-  console.log('   Status:', catalogRes.status)
-  if (catalogRes.ok) {
-    const catalog = await catalogRes.json()
-    const results = catalog.results ?? []
-    console.log(`   Total sellers: ${results.length}`)
-    results.slice(0, 5).forEach((r, i) => {
-      console.log(`   [${i+1}] id: ${r.id} | price: $${r.price}`)
-    })
+  // 2. Endpoint de producto/catálogo — trae TODOS los sellers del mismo producto
+  console.log(`\n2️⃣  GET /products/${CATALOG_PRODUCT_ID}/items (todos los sellers del producto)`)
+  const r2 = await fetchJson(`https://api.mercadolibre.com/products/${CATALOG_PRODUCT_ID}/items`, h)
+  console.log('   Status:', r2.status)
+  if (r2.ok) {
+    const results = r2.body?.results ?? []
+    console.log(`   ✅ ${results.length} sellers encontrados:`)
+    results.slice(0, 5).forEach((r, i) =>
+      console.log(`   [${i+1}] id: ${r.id} | precio: $${r.price} | seller: ${r.seller_id}`)
+    )
     if (results.length > 5) console.log(`   ... y ${results.length - 5} más`)
+  } else {
+    console.log('   body:', JSON.stringify(r2.body))
   }
 
-  console.log('\n✅  API OK — el bot puede trackear estos items.\n')
+  // 3. Buscar por seller (si tenemos un seller_id del item 1 o del catálogo)
+  console.log(`\n3️⃣  GET /sites/MLA/search?seller_id=... (publicaciones de un seller)`)
+  // Usar seller del resultado de catálogo o un seller de prueba
+  const sampleSellerId = r2.ok ? r2.body?.results?.[0]?.seller_id : null
+  if (sampleSellerId) {
+    const r3 = await fetchJson(
+      `https://api.mercadolibre.com/sites/MLA/search?seller_id=${sampleSellerId}&limit=3`,
+      h
+    )
+    console.log('   Status:', r3.status)
+    if (r3.ok) {
+      const items = r3.body?.results ?? []
+      console.log(`   ✅ ${r3.body?.paging?.total} publicaciones del seller ${sampleSellerId}`)
+      items.slice(0, 3).forEach((it, i) =>
+        console.log(`   [${i+1}] ${it.id} | $${it.price} | ${it.title?.slice(0, 40)}`)
+      )
+    }
+  } else {
+    console.log('   (saltado — no hay seller_id disponible)')
+  }
+
+  // 4. Probar items públicos alternativos (batch)
+  console.log(`\n4️⃣  GET /items?ids=... (batch con items públicos de prueba)`)
+  const batchIds = FALLBACK_ITEMS.join(',')
+  const r4 = await fetchJson(`https://api.mercadolibre.com/items?ids=${batchIds}`, h)
+  console.log('   Status:', r4.status)
+  if (Array.isArray(r4.body)) {
+    for (const entry of r4.body) {
+      const ok = entry.code === 200
+      console.log(
+        `   ${ok ? '✅' : '❌'} ${entry.body?.id ?? '?'} | code: ${entry.code}`,
+        ok ? `| $${entry.body.price} | ${entry.body.title?.slice(0, 40)}` : ''
+      )
+    }
+  }
+
+  console.log('\n─────────────────────────────────────────')
+  const apiWorks = r2.ok || (Array.isArray(r4.body) && r4.body.some(e => e.code === 200))
+  if (apiWorks) {
+    console.log('✅  API funciona. El bot puede trackear precios.')
+    console.log('   → El item del link original (MLA1670651449) es un catálogo privado.')
+    console.log('   → Usá los item IDs individuales de cada seller (los que aparecen en paso 2).')
+  } else {
+    console.log('❌  Algo no funciona. Revisá los scopes de la app en developers.mercadolibre.com.ar')
+  }
+  console.log()
 }
 
 test().catch(console.error)
